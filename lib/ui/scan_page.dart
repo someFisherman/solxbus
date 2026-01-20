@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/net/ip_range.dart';
+import '../core/net/local_ip.dart';
 import '../state/app_state.dart';
 
 class ScanPage extends StatefulWidget {
@@ -28,6 +29,37 @@ class _ScanPageState extends State<ScanPage> {
   bool running = false;
   String status = "idle";
   final List<String> found = [];
+
+  String? _localIp;
+  String? _suggestedCidr;
+
+  @override
+  void initState() {
+    super.initState();
+    _initLocalNetworkSuggestion();
+  }
+
+  Future<void> _initLocalNetworkSuggestion() async {
+    try {
+      final ip = await getLocalIPv4();
+      if (!mounted) return;
+
+      final cidr = (ip != null) ? cidrFromIp(ip) : null;
+
+      setState(() {
+        _localIp = ip;
+        _suggestedCidr = cidr;
+        // Nur automatisch setzen, wenn User noch den Default drin hat
+        // oder wenn Feld leer ist.
+        final current = _cidrCtrl.text.trim();
+        if (cidr != null && (current.isEmpty || current == "192.168.1.0/24")) {
+          _cidrCtrl.text = cidr;
+        }
+      });
+    } catch (_) {
+      // Ignorieren (z.B. keine Permission / keine IPv4)
+    }
+  }
 
   @override
   void dispose() {
@@ -55,7 +87,8 @@ class _ScanPageState extends State<ScanPage> {
 
     final port = int.tryParse(_portCtrl.text.trim()) ?? 502;
     final timeoutMs = int.tryParse(_timeoutMsCtrl.text.trim()) ?? 250;
-    final concurrency = (int.tryParse(_concurrencyCtrl.text.trim()) ?? 40).clamp(1, 200);
+    final concurrency =
+        (int.tryParse(_concurrencyCtrl.text.trim()) ?? 40).clamp(1, 200);
 
     List<String> ips;
     try {
@@ -96,7 +129,6 @@ class _ScanPageState extends State<ScanPage> {
 
           if (ok) {
             setState(() => found.add(ip));
-            // optional log
             context.read<AppState>().addScanLog("FOUND: $ip:$port");
           }
         } finally {
@@ -128,8 +160,22 @@ class _ScanPageState extends State<ScanPage> {
     });
   }
 
+  void _useSuggestedCidr() {
+    if (_suggestedCidr == null) return;
+    if (running) return;
+    setState(() {
+      useCidr = true;
+      _cidrCtrl.text = _suggestedCidr!;
+      status = "Lokales Netz übernommen: ${_suggestedCidr!}";
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final suggestionText = (_localIp != null && _suggestedCidr != null)
+        ? "Erkannt: $_localIp → $_suggestedCidr"
+        : "Lokales Netz noch nicht erkannt (Permission prüfen).";
+
     return Scaffold(
       appBar: AppBar(title: const Text("solXbus – Scan (TCP/502)")),
       body: ListView(
@@ -141,8 +187,32 @@ class _ScanPageState extends State<ScanPage> {
               ButtonSegment(value: false, label: Text("Start–End")),
             ],
             selected: {useCidr},
-            onSelectionChanged: running ? null : (s) => setState(() => useCidr = s.first),
+            onSelectionChanged:
+                running ? null : (s) => setState(() => useCidr = s.first),
           ),
+          const SizedBox(height: 12),
+
+          // Local network hint + button
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Icon(Icons.wifi),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(suggestionText)),
+                  const SizedBox(width: 10),
+                  OutlinedButton(
+                    onPressed: (!running && _suggestedCidr != null)
+                        ? _useSuggestedCidr
+                        : null,
+                    child: const Text("Übernehmen"),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
           const SizedBox(height: 12),
 
           if (useCidr)
@@ -151,7 +221,7 @@ class _ScanPageState extends State<ScanPage> {
               enabled: !running,
               decoration: const InputDecoration(
                 labelText: "IP-Range (CIDR)",
-                hintText: "z.B. 192.168.1.0/24",
+                hintText: "z.B. 192.168.0.0/24",
                 border: OutlineInputBorder(),
               ),
             )
