@@ -17,7 +17,12 @@ class ModbusTcpClient {
   final bool keepAlive;
 
   Socket? _socket;
+  StreamSubscription<Uint8List>? _rxSub;
+
   int _txId = 1;
+
+  final BytesBuilder _rxBuf = BytesBuilder(copy: false);
+  Completer<void>? _rxWaiter;
 
   ModbusTcpClient({
     required this.host,
@@ -29,13 +34,30 @@ class ModbusTcpClient {
 
   Future<void> connect() async {
     if (_socket != null && keepAlive) return;
+
     _socket = await Socket.connect(host, port, timeout: timeout);
     _socket!.setOption(SocketOption.tcpNoDelay, true);
+
+    _rxSub = _socket!.listen((chunk) {
+      _rxBuf.add(chunk);
+      _rxWaiter?.complete();
+      _rxWaiter = null;
+    }, onError: (e) {
+      _rxWaiter?.completeError(e);
+      _rxWaiter = null;
+    }, onDone: () {
+      _rxWaiter?.completeError(ModbusException("Socket closed"));
+      _rxWaiter = null;
+    });
   }
 
   Future<void> close() async {
     final s = _socket;
     _socket = null;
+
+    await _rxSub?.cancel();
+    _rxSub = null;
+
     if (s != null) await s.close();
   }
 
@@ -54,6 +76,28 @@ class ModbusTcpClient {
     }
   }
 
+  Future<Uint8List> _readExactly(int n) async {
+    final deadline = DateTime.now().add(timeout);
+
+    while (_rxBuf.length < n) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining.isNegative) throw ModbusException("Timeout reading $n bytes");
+
+      _rxWaiter ??= Completer<void>();
+      await _rxWaiter!.future.timeout(remaining, onTimeout: () {
+        throw ModbusException("Timeout reading $n bytes");
+      });
+    }
+
+    final all = _rxBuf.takeBytes();
+    final head = Uint8List.sublistView(all, 0, n);
+
+    if (all.length > n) {
+      _rxBuf.add(Uint8List.sublistView(all, n));
+    }
+    return head;
+  }
+
   Future<Uint8List> _sendPdu(Uint8List pdu) async {
     await connect();
     final s = _socket!;
@@ -70,44 +114,14 @@ class ModbusTcpClient {
     await s.flush();
 
     final hdr = await _readExactly(7);
-    if (hdr.length != 7) throw ModbusException("Short MBAP header");
-
     final bd = ByteData.sublistView(hdr);
+
     final proto = bd.getUint16(2);
     final len = bd.getUint16(4);
     if (proto != 0) throw ModbusException("Unexpected protocol $proto");
 
-    final remain = len - 1;
-    final resp = await _readExactly(remain);
-    return resp;
-  }
-
-  Future<Uint8List> _readExactly(int n) async {
-    final s = _socket!;
-    final completer = Completer<Uint8List>();
-    final buf = BytesBuilder();
-
-    late StreamSubscription sub;
-    Timer? t;
-
-    void doneError(Object e) {
-      t?.cancel();
-      sub.cancel();
-      if (!completer.isCompleted) completer.completeError(e);
-    }
-
-    sub = s.listen((chunk) {
-      buf.add(chunk);
-      if (buf.length >= n) {
-        t?.cancel();
-        sub.cancel();
-        final all = buf.takeBytes();
-        completer.complete(Uint8List.sublistView(all, 0, n));
-      }
-    }, onError: doneError, onDone: () => doneError(ModbusException("Socket closed")));
-
-    t = Timer(timeout, () => doneError(ModbusException("Timeout reading $n bytes")));
-    return completer.future;
+    final remain = len - 1; // ohne UnitId
+    return await _readExactly(remain);
   }
 
   List<int> _decodeBits(Uint8List bytes, int count) {
@@ -115,8 +129,7 @@ class ModbusTcpClient {
     for (var i = 0; i < count; i++) {
       final byteIndex = i ~/ 8;
       final bitIndex = i % 8;
-      final val = (bytes[byteIndex] >> bitIndex) & 1;
-      out.add(val);
+      out.add((bytes[byteIndex] >> bitIndex) & 1);
     }
     return out;
   }
