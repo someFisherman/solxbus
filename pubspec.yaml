@@ -2,7 +2,7 @@ name: solxbus
 description: "solXbus – Modbus Profi-Tool (Flutter)"
 publish_to: 'none'
 
-version: 0.1.0+2
+version: 0.1.0+3
 
 environment:
   sdk: ^3.9.2
