@@ -24,7 +24,7 @@ class _ScanPageState extends State<ScanPage> {
 
   final _portCtrl = TextEditingController(text: "502");
   final _timeoutMsCtrl = TextEditingController(text: "250");
-  final _concurrencyCtrl = TextEditingController(text: "40");
+  final _concurrencyCtrl = TextEditingController(text: "254");
 
   bool running = false;
   String status = "idle";
